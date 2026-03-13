@@ -209,8 +209,16 @@ bot.on('text', async (ctx: Context) => {
 });
 
 bot.launch().then(async () => {
-    await client.connect();
-    console.log("🚀 Bot is listening with MongoDB cache!");
+    try {
+        await client.connect();
+        // Ping the database to verify the connection is actually working
+        await client.db('admin').command({ ping: 1 });
+        console.log("✅ MongoDB Connection Successful!");
+        console.log("🚀 Bot is listening with MongoDB cache!");
+    } catch (error) {
+        console.error("❌ MongoDB Connection Failed:", error);
+        process.exit(1); // Exit if DB connection fails
+    }
 });
 
 // Graceful stop
