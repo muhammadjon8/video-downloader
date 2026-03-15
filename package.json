@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "nodemon bot.ts",
     "build": "tsc",
-    "start": "node dist/bot.js"
+    "start": "ts-node bot.ts"
   },
   "keywords": [],
   "author": "",

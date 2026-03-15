@@ -5,7 +5,7 @@ import fs from 'fs';
 import { createReadStream } from 'fs';
 import { Agent } from 'https';
 import * as dotenv from 'dotenv';
-import { MongoClient } from 'mongodb';
+import { MongoClient, Collection, Db } from 'mongodb';
 import { normalizeUrl } from './util';
 
 dotenv.config();
@@ -25,36 +25,66 @@ const bot = new Telegraf(BOT_TOKEN, {
     }
 });
 
-// MongoDB Client
-const client = new MongoClient(DB_URL);
-const db = client.db('media_downloader');
-const collection = db.collection('video_cache');
+// MongoDB Client with optimized configuration
+const client = new MongoClient(DB_URL, {
+    maxPoolSize: 10,
+    minPoolSize: 2,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    connectTimeoutMS: 10000,
+    retryWrites: true,
+    retryReads: true,
+    // Add these TLS options if you're having SSL issues
+    tls: true,
+    tlsAllowInvalidCertificates: false, // Set to true ONLY for development with self-signed certs
+});
+
+let db: Db;
+let collection: Collection;
+let isDbConnected = false;
 
 async function getCachedVideo(url: string): Promise<{ fileId: string, caption?: string } | null> {
+    if (!isDbConnected) {
+        console.warn("⚠️ DB not connected, skipping cache check");
+        return null;
+    }
+    
     try {
-        const result = await collection.findOne({ url });
+        const result = await collection.findOne({ url }, { maxTimeMS: 2000 });
         if (!result) return null;
         return { 
             fileId: result.fileId as string, 
             caption: result.caption as string 
         };
-    } catch (error) {
-        console.error("DB Get Error:", error);
+    } catch (error: any) {
+        console.error("DB Get Error:", error.message);
         return null;
     }
 }
 
 async function saveFileIdToDb(url: string, fileId: string, caption: string): Promise<void> {
+    if (!isDbConnected) {
+        console.warn("⚠️ DB not connected, skipping save");
+        return;
+    }
+    
     try {
         await collection.updateOne(
             { url },
             { $set: { fileId, caption, updatedAt: new Date() } },
-            { upsert: true }
+            { upsert: true, maxTimeMS: 5000 }
         );
-        console.log(`💾 Saved to MongoDB: ${url} -> ${fileId}`);
-    } catch (error) {
-        console.error("DB Save Error:", error);
+        console.log(`💾 Saved to MongoDB: ${url.substring(0, 50)}... -> ${fileId}`);
+    } catch (error: any) {
+        console.error("DB Save Error:", error.message);
     }
+}
+
+interface VideoInfo {
+    title?: string;
+    duration?: number;
+    filesize?: number;
+    filesize_approx?: number;
 }
 
 bot.command('start', (ctx) => {
@@ -76,8 +106,10 @@ bot.on('text', async (ctx: Context) => {
     const rawUrl = urlMatch[0];
     const cleanUrl = normalizeUrl(rawUrl); 
 
+    let statusMessage: any = null;
+
     try {
-        // 1. CHECK DATABASE FIRST
+        // 1. CHECK DATABASE FIRST (with quick timeout)
         const cached = await getCachedVideo(cleanUrl);
 
         if (cached) {
@@ -93,82 +125,132 @@ bot.on('text', async (ctx: Context) => {
 
         // 2. CACHE MISS: FETCH INFO AND DOWNLOAD
         console.log("🐢 CACHE MISS! Fetching info...");
-        const statusMessage = await ctx.reply("🔍 Fetching video info...", {
-            reply_parameters: { message_id: messageId }
-        });
-
-        // Get metadata
-        let info: any;
-        try {
-            // @ts-ignore
-            info = await youtubedl(cleanUrl, {
+        
+        // Send initial status and start fetching info in parallel
+        const [statusMsg, info] = await Promise.allSettled([
+            ctx.reply("🔍 Fetching video info...", {
+                reply_parameters: { message_id: messageId }
+            }),
+            youtubedl(cleanUrl, {
                 dumpSingleJson: true,
                 noPlaylist: true,
-            });
-        } catch (infoErr: any) {
-            console.error("Metadata Error:", infoErr.message);
-            await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, "⚠️ Could not fetch video info, attempting download anyway...");
-            info = { title: "Video" }; 
-        }
+                noCheckCertificates: true,
+                preferFreeFormats: true,
+            }).catch((err) => {
+                console.warn("Metadata fetch failed, will use defaults:", err.message);
+                return { title: "Video", duration: 0, filesize: 0 } as VideoInfo;
+            })
+        ]);
 
-        const title = info.title || "Video";
-        const fileSize = info.filesize || info.filesize_approx || 0;
+        // Extract results
+        statusMessage = statusMsg.status === 'fulfilled' ? statusMsg.value : null;
+        const videoInfo = (info.status === 'fulfilled' ? info.value : { title: "Video", duration: 0, filesize: 0 }) as VideoInfo;
+
+        const title = videoInfo.title || "Video";
+        const fileSize = videoInfo.filesize || videoInfo.filesize_approx || 0;
         const sizeMB = fileSize ? (fileSize / (1024 * 1024)).toFixed(2) : "Unknown";
-        const duration = info.duration ? Math.floor(info.duration / 60) + ":" + (info.duration % 60).toString().padStart(2, '0') : "Unknown";
-        const quality = info.format || info.format_note || "Best";
+        const durationFormatted = (() => {
+            if (!videoInfo.duration) return "Unknown";
+            const totalSeconds = Math.round(videoInfo.duration);
+            const mins = Math.floor(totalSeconds / 60);
+            const secs = totalSeconds % 60;
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        })();
 
         // Check for size limit (Bot API limit is 50MB for uploads)
         if (fileSize > 50 * 1024 * 1024) {
-             await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, 
-                `⚠️ This video is too large (${sizeMB} MB) to upload via Telegram Bot API (Limit: 50MB).`);
-             return;
+            const msg = `⚠️ This video is too large (${sizeMB} MB) to upload via Telegram Bot API (Limit: 50MB).`;
+            if (statusMessage) {
+                await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, msg);
+            } else {
+                await ctx.reply(msg, { reply_parameters: { message_id: messageId } });
+            }
+            return;
         }
 
-        await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, `⏳ Downloading video: <b>${title}</b>...\n(Size: ${sizeMB} MB)`, { parse_mode: 'HTML' });
+        // Update status
+        if (statusMessage) {
+            await ctx.telegram.editMessageText(
+                chatId, 
+                statusMessage.message_id, 
+                undefined, 
+                `⏳ Downloading: <b>${title.substring(0, 50)}${title.length > 50 ? '...' : ''}</b>\n(Size: ${sizeMB} MB)`, 
+                { parse_mode: 'HTML' }
+            ).catch(() => {});
+        }
         
         const outputPath = path.resolve(__dirname, `video_${Date.now()}.mp4`);
         
         try {
             await youtubedl(cleanUrl, {
                 output: outputPath,
-                format: 'best[ext=mp4]',
+                format: 'best[ext=mp4]/best',
                 noPlaylist: true,
+                noCheckCertificates: true,
             });
         } catch (downloadErr: any) {
             console.error("Download Error:", downloadErr.message);
-            await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, `❌ Download failed: ${downloadErr.message}`);
+            const msg = `❌ Download failed: ${downloadErr.message}`;
+            if (statusMessage) {
+                await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, msg);
+            } else {
+                await ctx.reply(msg, { reply_parameters: { message_id: messageId } });
+            }
             return;
         }
 
         // Verify file exists and get actual size
         if (!fs.existsSync(outputPath)) {
-            await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, `❌ Download failed: File not found`);
+            const msg = `❌ Download failed: File not found`;
+            if (statusMessage) {
+                await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, msg);
+            } else {
+                await ctx.reply(msg, { reply_parameters: { message_id: messageId } });
+            }
             return;
         }
 
         const stats = fs.statSync(outputPath);
         const actualSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
         
-        // 3. UPLOAD WITH STREAM (KEY FIX HERE)
-        await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, `📤 Uploading video to Telegram... (${actualSizeMB} MB)`);
+        // Re-check size after download
+        if (stats.size > 50 * 1024 * 1024) {
+            fs.unlinkSync(outputPath);
+            const msg = `⚠️ Downloaded video is too large (${actualSizeMB} MB). Telegram limit: 50MB`;
+            if (statusMessage) {
+                await ctx.telegram.editMessageText(chatId, statusMessage.message_id, undefined, msg);
+            } else {
+                await ctx.reply(msg, { reply_parameters: { message_id: messageId } });
+            }
+            return;
+        }
+        
+        // 3. UPLOAD WITH STREAM
+        if (statusMessage) {
+            await ctx.telegram.editMessageText(
+                chatId, 
+                statusMessage.message_id, 
+                undefined, 
+                `📤 Uploading to Telegram... (${actualSizeMB} MB)`
+            ).catch(() => {});
+        }
+        
         await ctx.sendChatAction('upload_video');
 
         const caption = 
             `🎬 <b>${title}</b>\n\n` +
             `📦 <b>Size:</b> ${actualSizeMB} MB\n` +
-            `⏱ <b>Duration:</b> ${duration}\n` +
-            `🎞 <b>Quality:</b> ${quality}`;
+            `⏱️ <b>Duration:</b> ${durationFormatted}`;
 
         try {
-            // ⭐ KEY FIX: Use createReadStream instead of direct path
             const sentMessage = await ctx.replyWithVideo(
                 { source: createReadStream(outputPath) },
                 {
                     caption: caption,
                     parse_mode: 'HTML',
-                    reply_parameters: { message_id: messageId }
-                    
-                },
+                    reply_parameters: { message_id: messageId },
+                    supports_streaming: true,
+                }
             );
 
             // Extract the file_id from the sent message
@@ -176,8 +258,10 @@ bot.on('text', async (ctx: Context) => {
             const newFileId = sentMessage.video?.file_id;
 
             if (newFileId) {
-                // 4. SAVE TO DATABASE
-                await saveFileIdToDb(cleanUrl, newFileId, caption);
+                // 4. SAVE TO DATABASE (don't await, let it happen in background)
+                saveFileIdToDb(cleanUrl, newFileId, caption).catch((err) => 
+                    console.error("Background save failed:", err.message)
+                );
             }
         } catch (uploadErr: any) {
             console.error("Upload Error:", uploadErr.message);
@@ -194,7 +278,9 @@ bot.on('text', async (ctx: Context) => {
             }
         } finally {
             // 5. CLEANUP - Always cleanup regardless of success/failure
-            await ctx.telegram.deleteMessage(chatId, statusMessage.message_id).catch(() => {});
+            if (statusMessage) {
+                await ctx.telegram.deleteMessage(chatId, statusMessage.message_id).catch(() => {});
+            }
             if (fs.existsSync(outputPath)) {
                 fs.unlinkSync(outputPath);
             }
@@ -205,28 +291,78 @@ bot.on('text', async (ctx: Context) => {
         await ctx.reply(`❌ An unexpected error occurred: ${error.message}`, {
             reply_parameters: { message_id: messageId }
         });
+        
+        // Cleanup on error
+        if (statusMessage) {
+            await ctx.telegram.deleteMessage(chatId, statusMessage.message_id).catch(() => {});
+        }
     }
 });
 
-bot.launch().then(async () => {
+// Initialize database connection BEFORE launching bot
+async function initializeMongoDB() {
+    console.log("🔌 Connecting to MongoDB...");
+    
     try {
         await client.connect();
-        // Ping the database to verify the connection is actually working
+        
+        // Ping the database to verify connection
         await client.db('admin').command({ ping: 1 });
+        
+        db = client.db('media_downloader');
+        collection = db.collection('video_cache');
+        
+        // Create index for faster lookups
+        await collection.createIndex({ url: 1 }, { unique: true, background: true });
+        
+        isDbConnected = true;
         console.log("✅ MongoDB Connection Successful!");
-        console.log("🚀 Bot is listening with MongoDB cache!");
-    } catch (error) {
-        console.error("❌ MongoDB Connection Failed:", error);
-        process.exit(1); // Exit if DB connection fails
+        console.log(`📊 Database: ${db.databaseName}`);
+        console.log(`📁 Collection: ${collection.collectionName}`);
+        
+        return true;
+    } catch (error: any) {
+        console.error("❌ MongoDB Connection Failed:", error.message);
+        console.error("Error details:", error);
+        console.warn("⚠️ Bot will continue WITHOUT caching functionality");
+        isDbConnected = false;
+        return false;
     }
+}
+
+// Main startup function
+async function startBot() {
+    // 1. First connect to MongoDB
+    await initializeMongoDB();
+    
+    // 2. Then launch the bot
+    await bot.launch();
+    
+    console.log("🚀 Bot is now listening!");
+    console.log(`📊 Cache Status: ${isDbConnected ? 'ENABLED ✅' : 'DISABLED ⚠️'}`);
+}
+
+// Start everything
+startBot().catch((error) => {
+    console.error("Failed to start bot:", error);
+    process.exit(1);
 });
 
-// Graceful stop
-process.once('SIGINT', () => {
-    client.close();
+// Graceful shutdown
+process.once('SIGINT', async () => {
+    console.log("\n⏹️ Shutting down gracefully...");
+    if (isDbConnected) {
+        await client.close();
+        console.log("✅ MongoDB connection closed");
+    }
     bot.stop('SIGINT');
 });
-process.once('SIGTERM', () => {
-    client.close();
+
+process.once('SIGTERM', async () => {
+    console.log("\n⏹️ Shutting down gracefully...");
+    if (isDbConnected) {
+        await client.close();
+        console.log("✅ MongoDB connection closed");
+    }
     bot.stop('SIGTERM');
 });
