@@ -5,8 +5,11 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon bot.ts",
+    "worker": "nodemon worker.ts",
+    "dev:all": "npx concurrently \"npm run dev\" \"npm run worker\"",
     "build": "tsc",
-    "start": "ts-node bot.ts"
+    "start": "ts-node bot.ts",
+    "start:worker": "ts-node worker.ts"
   },
   "keywords": [],
   "author": "",
@@ -19,7 +22,9 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "bullmq": "^5.71.0",
     "dotenv": "^17.3.1",
+    "ioredis": "^5.10.0",
     "mongodb": "^7.1.0",
     "node-fetch": "^3.3.2",
     "node-telegram-bot-api": "^0.67.0",
