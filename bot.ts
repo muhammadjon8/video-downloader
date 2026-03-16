@@ -53,8 +53,8 @@ async function getCachedVideo(url: string): Promise<{ fileId: string; caption?: 
 // ─── Commands ─────────────────────────────────────────────────────────────────
 bot.command('start', (ctx) => {
     ctx.reply(
-        '👋 Hello! Send me a link to a video from Instagram, YouTube, or TikTok and I will download it for you.\n\n' +
-        '⚡ Downloads are processed in the background — you\'ll receive your video as soon as it\'s ready!'
+        '👋 Assalomu alaykum! Menga Instagram, YouTube yoki TikTok dan video havolasini yuboring va men uni sizga yuklab beraman.\n\n' +
+        '⚡ Videongiz qisqa vaqt ichida tayyor bo\'ladi!'
     );
 });
 
@@ -81,7 +81,7 @@ bot.on('text', async (ctx: Context) => {
             console.log('⚡ CACHE HIT! Sending instantly...');
             await ctx.sendChatAction('upload_video');
             await ctx.replyWithVideo(cached.fileId, {
-                caption: cached.caption || '🎥 Here is your video! (Delivered instantly)',
+                caption: cached.caption || '🎥 Mana sizning videongiz!',
                 parse_mode: 'HTML',
                 reply_parameters: { message_id: messageId },
             });
@@ -91,10 +91,10 @@ bot.on('text', async (ctx: Context) => {
         // ── 2. Cache miss — queue the job and immediately acknowledge ────────
         console.log(`📥 Queue: Adding job for ${cleanUrl.substring(0, 60)}...`);
 
-        // Send a "queued" status message and pass its ID to the worker
+        // Send a friendly status message and pass its ID to the worker
         // so it can update the user with real-time progress.
         const statusMessage = await ctx.reply(
-            '📥 Your request has been queued!\n⏳ Downloading in the background — I\'ll send the video here when it\'s ready.',
+            '⏳ Video yuklanmoqda... Bir oz kuting.',
             { reply_parameters: { message_id: messageId } }
         );
 
@@ -106,18 +106,15 @@ bot.on('text', async (ctx: Context) => {
                 statusMessageId: statusMessage.message_id,
                 cleanUrl,
                 rawUrl,
-            },
-            {
-                // Use cleanUrl as deduplication key so multiple users
-                // sending the same link don't trigger redundant downloads
-                jobId: `url:${cleanUrl}`,
             }
+            // No fixed jobId — each request gets its own job so failed/stuck
+            // jobs from previous attempts don't block the same URL from retrying.
         );
 
         console.log(`✅ Job enqueued for chat ${chatId}`);
     } catch (error: any) {
         console.error('Error enqueuing job:', error.message);
-        await ctx.reply(`❌ Failed to queue your request: ${error.message}`, {
+        await ctx.reply(`❌ Xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.`, {
             reply_parameters: { message_id: messageId },
         });
     }

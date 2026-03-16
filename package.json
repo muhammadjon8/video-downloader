@@ -4,11 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "nodemon bot.ts",
-    "worker": "nodemon worker.ts",
-    "dev:all": "npx concurrently \"npm run dev\" \"npm run worker\"",
+    "dev": "concurrently --names \"BOT,WORKER\" --prefix-colors \"cyan,yellow\" \"nodemon bot.ts\" \"nodemon worker.ts\"",
+    "dev:bot": "nodemon bot.ts",
+    "dev:worker": "nodemon worker.ts",
     "build": "tsc",
-    "start": "ts-node bot.ts",
+    "start": "concurrently --names \"BOT,WORKER\" \"ts-node bot.ts\" \"ts-node worker.ts\"",
+    "start:bot": "ts-node bot.ts",
     "start:worker": "ts-node worker.ts"
   },
   "keywords": [],
@@ -18,6 +19,7 @@
   "devDependencies": {
     "@types/node": "^25.4.0",
     "@types/node-telegram-bot-api": "^0.64.14",
+    "concurrently": "^9.2.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   },

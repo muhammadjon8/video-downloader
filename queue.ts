@@ -6,8 +6,8 @@ dotenv.config();
 // Use plain connection options so BullMQ uses its *own* bundled ioredis
 // and we avoid the dual-ioredis version mismatch TypeScript error.
 export const redisConnection: ConnectionOptions = {
-    host: process.env.REDIS_HOST || '127.0.0.1',
-    port: Number(process.env.REDIS_PORT) || 6379,
+    host: process.env.REDIS_HOST,
+    port: Number(process.env.REDIS_PORT),
     maxRetriesPerRequest: null, // Required by BullMQ
     password: process.env.REDIS_PASSWORD,
 };

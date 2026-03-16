@@ -113,7 +113,7 @@ async function processVideoJob(job: Job<VideoJobData>) {
     let sizeMB: string = 'Unknown';
 
     try {
-        await editStatus(chatId, statusMessageId, '🔍 Fetching video metadata...');
+        await editStatus(chatId, statusMessageId, '🔍 Video tayyorlanmoqda...');
 
         const info = await youtubedl(cleanUrl, {
             dumpSingleJson: true,
@@ -138,7 +138,7 @@ async function processVideoJob(job: Job<VideoJobData>) {
             await editStatus(
                 chatId,
                 statusMessageId,
-                `⚠️ This video is too large (${sizeMB} MB). Telegram Bot API limit is 50 MB.`
+                `⚠️ Uzr, videoning hajmi juda katta (${sizeMB} MB). Men faqat 50 MB gacha bo'lgan videolarni yuklay olaman.`
             );
             return;
         }
@@ -151,12 +151,12 @@ async function processVideoJob(job: Job<VideoJobData>) {
     await editStatus(
         chatId,
         statusMessageId,
-        `⏳ Downloading: <b>${title.substring(0, 50)}${title.length > 50 ? '...' : ''}</b>\n(Size: ${sizeMB} MB)`,
+        `⏳ Video yuklanmoqda... \n(Hajmi: ${sizeMB} MB)`,
         true
     );
 
     // ── Step 2: Download ────────────────────────────────────────────────────
-    const outputPath = path.resolve(__dirname, `video_${job.id}_${Date.now()}.mp4`);
+    const outputPath = path.resolve(process.cwd(), `video_${job.id}_${Date.now()}.mp4`);
 
     try {
         await youtubedl(cleanUrl, {
@@ -167,13 +167,13 @@ async function processVideoJob(job: Job<VideoJobData>) {
         });
     } catch (dlErr: any) {
         console.error(`❌ [Job ${job.id}] Download error:`, dlErr.message);
-        await editStatus(chatId, statusMessageId, `❌ Download failed: ${dlErr.message}`);
+        await editStatus(chatId, statusMessageId, `❌ Videoni yuklab olishda xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.`);
         throw dlErr; // Let BullMQ handle retry
     }
 
     if (!fs.existsSync(outputPath)) {
         const msg = '❌ Download failed: File not created on disk.';
-        await editStatus(chatId, statusMessageId, msg);
+        await editStatus(chatId, statusMessageId, `❌ Videoni yuklab olishda xatolik yuz berdi.`);
         throw new Error(msg);
     }
 
@@ -188,19 +188,19 @@ async function processVideoJob(job: Job<VideoJobData>) {
         await editStatus(
             chatId,
             statusMessageId,
-            `⚠️ Downloaded video is too large (${actualSizeMB} MB). Telegram limit: 50 MB.`
+            `⚠️ Uzr, yuklab olingan video hajmi juda katta (${actualSizeMB} MB). Men faqat 50 MB gacha bo'lgan videolarni yuklay olaman.`
         );
         return;
     }
 
     // ── Step 3: Upload ──────────────────────────────────────────────────────
-    await editStatus(chatId, statusMessageId, `📤 Uploading to Telegram... (${actualSizeMB} MB)`);
+    await editStatus(chatId, statusMessageId, `📤 Telegramga jo'natilmoqda...`);
     await telegram.sendChatAction(chatId, 'upload_video');
 
     const caption =
         `🎬 <b>${title}</b>\n\n` +
-        `📦 <b>Size:</b> ${actualSizeMB} MB\n` +
-        `⏱️ <b>Duration:</b> ${durationFormatted}`;
+        `📦 <b>Hajmi:</b> ${actualSizeMB} MB\n` +
+        `⏱️ <b>Davomiyligi:</b> ${durationFormatted}`;
 
     try {
         const sentMessage = await telegram.sendVideo(
@@ -237,13 +237,13 @@ async function processVideoJob(job: Job<VideoJobData>) {
         if (uploadErr.message?.includes('timeout') || uploadErr.message?.includes('ETIMEOUT')) {
             await telegram.sendMessage(
                 chatId,
-                `⚠️ Upload timed out. The video might still be processing. Please try again.`,
+                `⚠️ Uzr, serverda yuklash vaqti uzayib ketdi. Iltimos, keyinroq qayta urinib ko'ring.`,
                 { reply_parameters: { message_id: messageId } }
             );
         } else {
             await telegram.sendMessage(
                 chatId,
-                `❌ Failed to upload: ${uploadErr.message}`,
+                `❌ Videoni yuborishda xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.`,
                 { reply_parameters: { message_id: messageId } }
             );
         }
