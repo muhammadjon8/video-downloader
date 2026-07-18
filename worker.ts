@@ -16,7 +16,8 @@
 import { Worker, Job } from 'bullmq';
 import ytDlp from 'yt-dlp-exec';
 import { Telegraf } from 'telegraf';
-import { Agent } from 'https';
+import { Agent as HttpsAgent } from 'https';
+import { Agent as HttpAgent } from 'http';
 import path from 'path';
 import fs from 'fs';
 import { createReadStream } from 'fs';
@@ -44,9 +45,12 @@ if (!BOT_TOKEN) throw new Error('BOT_TOKEN must be provided in .env file');
 if (!DB_URL) throw new Error('DB_URL must be provided in .env file');
 
 // Telegraf bot instance (used only to send messages FROM the worker)
+// The agent class must match the apiRoot's protocol — an https.Agent used
+// against a plain-http local Bot API server silently hangs instead of erroring.
+const AgentClass = TELEGRAM_API_ROOT.startsWith('https:') ? HttpsAgent : HttpAgent;
 const telegram = new Telegraf(BOT_TOKEN, {
     telegram: {
-        agent: new Agent({ keepAlive: true, family: 4 }),
+        agent: new AgentClass({ keepAlive: true, family: 4 }),
         apiRoot: TELEGRAM_API_ROOT,
     },
 }).telegram;
@@ -104,6 +108,43 @@ async function editStatus(chatId: number, msgId: number | null, text: string, ht
     }
 }
 
+// ─── Shared user-facing messages ───────────────────────────────────────────
+// One canonical string per scenario, reused everywhere that scenario can be
+// triggered from — avoids near-duplicate messages drifting out of sync.
+// Stage-agnostic on purpose — the user doesn't care whether the download or
+// the Telegram upload was the point of failure, only that they didn't get
+// their video, so this covers both.
+const GENERIC_FAILURE_MESSAGE =
+    "Videoni yuborib bo'lmadi. Birozdan so'ng qayta urinib ko'ring yoki @pullstackdeveloper ga murojaat qiling.";
+
+function sizeLimitMessage(sizeMB: string): string {
+    return `Video hajmi — ${sizeMB} MB. Ruxsat etilgan chegara: ${TELEGRAM_MAX_UPLOAD_MB} MB.`;
+}
+
+// ─── Helper: Translate a raw yt-dlp/network error into a short, professional
+// user-facing Uzbek message. Only distinguishes cases the user can act on
+// (bad link, private video, region lock, live stream) — everything else
+// (rate limits, bot-checks, timeouts, etc.) collapses into the generic
+// message so we're not surfacing internal failure details ───
+function describeDownloadError(message: string): string {
+    const m = (message || '').toLowerCase();
+
+    if (m.includes('private video') || m.includes('video unavailable') || m.includes('video is unavailable')) {
+        return "Video mavjud emas — o'chirilgan yoki yopiq bo'lishi mumkin.";
+    }
+    if (m.includes('unsupported url') || m.includes('no video formats found')) {
+        return "Havoladan video topilmadi. Havolani tekshirib qayta yuboring.";
+    }
+    if (m.includes('not available in your country') || (m.includes('geo') && m.includes('restrict'))) {
+        return "Bu video hududiy sabablarga ko'ra mavjud emas.";
+    }
+    if (m.includes('live event') || m.includes('livestream') || (m.includes('live') && m.includes('stream'))) {
+        return "Jonli translyatsiyalar hozircha qo'llab-quvvatlanmaydi.";
+    }
+
+    return GENERIC_FAILURE_MESSAGE;
+}
+
 // ─── Video Job Processor ──────────────────────────────────────────────────────
 async function processVideoJob(job: Job<VideoJobData>) {
     const { chatId, messageId, statusMessageId, cleanUrl } = job.data;
@@ -120,14 +161,15 @@ async function processVideoJob(job: Job<VideoJobData>) {
     let sizeMB: string = 'Unknown';
 
     try {
-        await editStatus(chatId, statusMessageId, '🔍 Video tayyorlanmoqda...');
+        await editStatus(chatId, statusMessageId, '🔎 Video tayyorlanmoqda…');
 
         const info = await ytDlp(cleanUrl, {
             dumpSingleJson: true,
             noPlaylist: true,
             noCheckCertificate: true,
             preferFreeFormats: true,
-        }) as any;
+            extractorArgs: 'youtube:player_client=android',
+        } as any) as any;
 
         title = info.title || 'Video';
         fileSize = info.filesize || info.filesize_approx || 0;
@@ -142,11 +184,7 @@ async function processVideoJob(job: Job<VideoJobData>) {
 
         // Check upload limit (pre-download)
         if (fileSize > MAX_UPLOAD_BYTES) {
-            await editStatus(
-                chatId,
-                statusMessageId,
-                `⚠️ Uzr, videoning hajmi juda katta (${sizeMB} MB). Men faqat ${TELEGRAM_MAX_UPLOAD_MB} MB gacha bo'lgan videolarni yuklay olaman.`
-            );
+            await editStatus(chatId, statusMessageId, sizeLimitMessage(sizeMB));
             return;
         }
     } catch (metaErr: any) {
@@ -155,12 +193,8 @@ async function processVideoJob(job: Job<VideoJobData>) {
     }
 
     await job.updateProgress(20);
-    await editStatus(
-        chatId,
-        statusMessageId,
-        `⏳ Video yuklanmoqda... \n(Hajmi: ${sizeMB} MB)`,
-        true
-    );
+    const sizeSuffix = sizeMB !== 'Unknown' ? ` (${sizeMB} MB)` : '';
+    await editStatus(chatId, statusMessageId, `⬇️ Yuklanmoqda…${sizeSuffix}`);
 
     // ── Step 2: Download ────────────────────────────────────────────────────
     const outputPath = path.resolve(process.cwd(), `video_${job.id}_${Date.now()}.mp4`);
@@ -171,16 +205,17 @@ async function processVideoJob(job: Job<VideoJobData>) {
             format: 'best[ext=mp4]/best',
             noPlaylist: true,
             noCheckCertificate: true,
-        });
+            extractorArgs: 'youtube:player_client=android',
+        } as any);
     } catch (dlErr: any) {
         console.error(`❌ [Job ${job.id}] Download error:`, dlErr.message);
-        await editStatus(chatId, statusMessageId, `❌ Videoni yuklab olishda xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.`);
+        await editStatus(chatId, statusMessageId, describeDownloadError(dlErr.message));
         throw dlErr; // Let BullMQ handle retry
     }
 
     if (!fs.existsSync(outputPath)) {
         const msg = '❌ Download failed: File not created on disk.';
-        await editStatus(chatId, statusMessageId, `❌ Videoni yuklab olishda xatolik yuz berdi.`);
+        await editStatus(chatId, statusMessageId, GENERIC_FAILURE_MESSAGE);
         throw new Error(msg);
     }
 
@@ -192,22 +227,19 @@ async function processVideoJob(job: Job<VideoJobData>) {
     // Re-check size after actual download
     if (stats.size > MAX_UPLOAD_BYTES) {
         fs.unlinkSync(outputPath);
-        await editStatus(
-            chatId,
-            statusMessageId,
-            `⚠️ Uzr, yuklab olingan video hajmi juda katta (${actualSizeMB} MB). Men faqat ${TELEGRAM_MAX_UPLOAD_MB} MB gacha bo'lgan videolarni yuklay olaman.`
-        );
+        await editStatus(chatId, statusMessageId, sizeLimitMessage(actualSizeMB));
         return;
     }
 
     // ── Step 3: Upload ──────────────────────────────────────────────────────
-    await editStatus(chatId, statusMessageId, `📤 Telegramga jo'natilmoqda...`);
+    await editStatus(chatId, statusMessageId, '📤 Yuborilmoqda…');
     await telegram.sendChatAction(chatId, 'upload_video');
 
-    const caption =
-        `🎬 <b>${title}</b>\n\n` +
-        `📦 <b>Hajmi:</b> ${actualSizeMB} MB\n` +
-        `⏱️ <b>Davomiyligi:</b> ${durationFormatted}`;
+    const metaLine = [
+        durationFormatted !== 'Unknown' ? `⏱ ${durationFormatted}` : null,
+        `${actualSizeMB} MB`,
+    ].filter(Boolean).join(' · ');
+    const caption = `🎬 <b>${title}</b>\n${metaLine}\n\nvia @pullstackdeveloper`;
 
     try {
         const sentMessage = await telegram.sendVideo(
@@ -241,19 +273,9 @@ async function processVideoJob(job: Job<VideoJobData>) {
     } catch (uploadErr: any) {
         console.error(`❌ [Job ${job.id}] Upload error:`, uploadErr.message);
 
-        if (uploadErr.message?.includes('timeout') || uploadErr.message?.includes('ETIMEOUT')) {
-            await telegram.sendMessage(
-                chatId,
-                `⚠️ Uzr, serverda yuklash vaqti uzayib ketdi. Iltimos, keyinroq qayta urinib ko'ring.`,
-                { reply_parameters: { message_id: messageId } }
-            );
-        } else {
-            await telegram.sendMessage(
-                chatId,
-                `❌ Videoni yuborishda xatolik yuz berdi. Iltimos, keyinroq qayta urinib ko'ring.`,
-                { reply_parameters: { message_id: messageId } }
-            );
-        }
+        await telegram.sendMessage(chatId, describeDownloadError(uploadErr.message), {
+            reply_parameters: { message_id: messageId },
+        });
         throw uploadErr; // Trigger BullMQ retry
     } finally {
         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);

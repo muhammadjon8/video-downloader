@@ -40,6 +40,11 @@ your bot token) from https://my.telegram.org/apps.
 docker compose --profile local-api up -d --build
 ```
 
+## YouTube blocking downloads ("Sign in to confirm you're not a bot")
+
+`worker.ts` passes `--extractor-args youtube:player_client=android` to yt-dlp, which avoids
+YouTube's bot-check wall for most videos without needing any account or cookies.
+
 ## Logs
 
 ```bash

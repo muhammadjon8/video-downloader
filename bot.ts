@@ -1,5 +1,6 @@
 import { Telegraf, Context } from 'telegraf';
-import { Agent } from 'https';
+import { Agent as HttpsAgent } from 'https';
+import { Agent as HttpAgent } from 'http';
 import * as dotenv from 'dotenv';
 import { MongoClient, Collection, Db } from 'mongodb';
 import { normalizeUrl } from './util';
@@ -15,10 +16,15 @@ if (!BOT_TOKEN) throw new Error('BOT_TOKEN must be provided in .env file');
 if (!DB_URL) throw new Error('DB_URL must be provided in .env file');
 
 // ─── Bot Setup ────────────────────────────────────────────────────────────────
+// The agent class must match the apiRoot's protocol — an https.Agent used
+// against a plain-http local Bot API server silently hangs (it attempts a
+// TLS handshake the server never responds to in kind) instead of erroring.
+const AgentClass = TELEGRAM_API_ROOT.startsWith('https:') ? HttpsAgent : HttpAgent;
+
 const bot = new Telegraf(BOT_TOKEN, {
     handlerTimeout: 90_000,
     telegram: {
-        agent: new Agent({ keepAlive: true, family: 4 }),
+        agent: new AgentClass({ keepAlive: true, family: 4 }),
         apiRoot: TELEGRAM_API_ROOT,
     },
 });
